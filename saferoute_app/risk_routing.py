@@ -41,7 +41,15 @@ import folium
 # 0. 설정
 # --------------------------------------------------------------------------
 
-PATH_G_FULL = "changwon_G_full_with_risk.pkl"
+# 체크포인트 경로는 "현재 작업 디렉토리"가 아니라 "이 파일(risk_routing.py) 자신의 위치"
+# 기준 절대경로로 계산합니다. Streamlit Cloud처럼 저장소 하위 폴더(예: saferoute_app/)를
+# Main file path로 지정해서 실행하는 환경에서는, 실행 시 작업 디렉토리가 그 하위 폴더가
+# 아니라 저장소 루트일 수 있어서 상대경로("changwon_G_full_with_risk.pkl")가 엉뚱한
+# 위치(루트)를 가리키게 되는 문제가 있었습니다. __file__ 기준으로 고정하면 이 문제를
+# 완전히 피할 수 있습니다 (로컬 실행이든 Streamlit Cloud든 항상 이 .py 파일과 같은
+# 디렉토리에서 pkl을 찾습니다).
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+PATH_G_FULL = os.path.join(_MODULE_DIR, "changwon_G_full_with_risk.pkl")
 
 # 학과서버 네트워크가 끊겨도 데모가 가능하도록, 자주 쓰는 지점은 좌표를 하드코딩해둡니다.
 # (Nominatim 지오코딩은 네트워크 상태에 따라 실패할 수 있음)

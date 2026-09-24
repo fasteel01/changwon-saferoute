@@ -35,6 +35,79 @@ ROUTE_LABELS = {"shortest": "최단거리", "bike": "자전거도로 우선", "r
 ROUTE_DOTS = {"shortest": "🔵", "bike": "🟢", "risk": "🔴"}
 MAJOR_ROAD_HIERARCHY_THRESHOLD = 0.6  # hierarchy_component 기준: secondary 이상을 "큰 도로"로 취급
 
+# 지도 위험 지점 마커·범례와 동일한 색(RISK_ZONE_COLOR)을 그대로 써서,
+# "피할 수 없는 위험 구간" 패널이 지도와 한눈에 같은 경고로 인식되게 합니다.
+RISK_ACCENT = rr.RISK_ZONE_COLOR
+
+st.markdown(
+    f"""
+    <style>
+    .risk-alert-card {{
+        border-left: 6px solid {RISK_ACCENT};
+        background: linear-gradient(135deg, rgba(232,98,44,0.12), rgba(232,98,44,0.03));
+        border-radius: 10px;
+        padding: 20px 22px;
+        margin: 4px 0 20px 0;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.10);
+    }}
+    .risk-alert-header {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+    }}
+    .risk-alert-icon {{ width: 30px; height: 30px; }}
+    .risk-alert-title {{
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: {RISK_ACCENT};
+        letter-spacing: -0.01em;
+    }}
+    .risk-alert-lede {{
+        font-size: 1.05rem;
+        margin-bottom: 12px;
+        line-height: 1.55;
+    }}
+    .risk-alert-why {{
+        background: rgba(232,98,44,0.10);
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 0.93rem;
+        margin-bottom: 18px;
+        line-height: 1.5;
+    }}
+    .risk-alert-body {{
+        display: flex;
+        gap: 28px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }}
+    .risk-score-block {{ min-width: 130px; }}
+    .risk-score-value {{
+        font-size: 2.8rem;
+        font-weight: 800;
+        color: {RISK_ACCENT};
+        line-height: 1;
+    }}
+    .risk-score-unit {{ font-size: 1.25rem; font-weight: 600; margin-left: 2px; }}
+    .risk-score-caption {{ font-size: 0.8rem; color: #8a8a8a; margin-top: 6px; }}
+    .risk-detail-block {{ flex: 1; min-width: 260px; }}
+    .risk-detail-road {{ font-weight: 700; font-size: 1.05rem; }}
+    .risk-detail-meta {{ font-size: 0.85rem; color: #8a8a8a; margin-bottom: 6px; }}
+    .risk-bar-hint {{ font-size: 0.76rem; color: #8a8a8a; margin-bottom: 8px; font-style: italic; }}
+    .risk-bar-row {{ display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }}
+    .risk-bar-label {{ font-size: 0.8rem; color: #8a8a8a; width: 82px; flex-shrink: 0; }}
+    .risk-bar-track {{
+        flex: 1; height: 9px; background: rgba(128,128,128,0.18);
+        border-radius: 5px; overflow: hidden;
+    }}
+    .risk-bar-fill {{ height: 100%; background: {RISK_ACCENT}; border-radius: 5px; }}
+    .risk-bar-pct {{ font-size: 0.78rem; color: #8a8a8a; width: 36px; text-align: right; flex-shrink: 0; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 @st.cache_resource(show_spinner="창원시 전체 도로 그래프 불러오고 위험도 계산하는 중... (최초 1회만, 몇 분 걸릴 수 있어요)")
 def get_g_full_with_risk():
@@ -147,6 +220,52 @@ def build_recommendation_explanation(stats, profiles):
         parts.append("자전거도로 우선 경로와 위험도 차이는 크지 않습니다.")
 
     return " ".join(parts)
+
+
+def _risk_bar_html(label: str, value: float) -> str:
+    """'피할 수 없는 위험 구간' 카드 안의 accent색 커스텀 진행률 바 한 줄."""
+    v = min(max(value, 0.0), 1.0)
+    return (
+        '<div class="risk-bar-row">'
+        f'<div class="risk-bar-label">{label}</div>'
+        '<div class="risk-bar-track">'
+        f'<div class="risk-bar-fill" style="width:{v * 100:.0f}%;"></div>'
+        "</div>"
+        f'<div class="risk-bar-pct">{v * 100:.0f}%</div>'
+        "</div>"
+    )
+
+
+# OSM highway 태그(영문) -> 사용자가 바로 이해할 수 있는 한글 도로 유형.
+# risk_routing.HIERARCHY_WEIGHT_MAP과 같은 키 집합을 씁니다.
+HIGHWAY_LABEL_KO = {
+    "motorway": "고속도로", "motorway_link": "고속도로",
+    "trunk": "자동차전용도로", "trunk_link": "자동차전용도로",
+    "primary": "간선도로(대로)", "primary_link": "간선도로(대로)",
+    "secondary": "주요도로", "secondary_link": "주요도로",
+    "tertiary": "일반도로", "tertiary_link": "일반도로",
+    "unclassified": "일반도로",
+    "residential": "이면도로(주택가 도로)",
+    "living_street": "생활도로",
+    "service": "이면도로",
+    "cycleway": "자전거도로",
+    "footway": "보행로",
+    "path": "소로(작은 길)",
+}
+
+
+def _highway_label_ko(value) -> str:
+    v = value[0] if isinstance(value, list) else value
+    return HIGHWAY_LABEL_KO.get(v, "도로")
+
+
+def _road_description(e: dict) -> str:
+    """도로명 + 한글 도로유형을 사용자가 바로 이해할 수 있는 한 구절로 합칩니다."""
+    label = _highway_label_ko(e.get("highway"))
+    name = e.get("name")
+    if isinstance(name, list):
+        name = name[0] if name else None
+    return f"{name} ({label})" if name else f"이름 없는 {label} 구간"
 
 
 col_input, col_result = st.columns([1, 2.2], gap="large")
@@ -277,50 +396,64 @@ with col_result:
 
         if shared:
             e = ref
-            with st.container(border=True):
-                st.markdown("#### 🚧 피할 수 없는 위험 구간")
-                st.write(
-                    "**어떤 경로를 선택해도** 이 구간은 반드시 지나가게 됩니다. "
-                    "대신할 다른 길이 없기 때문이에요."
-                )
-                has_infra = e.get("infra_bonus_component", 0) > 0
-                why = (
-                    "자전거 보호시설은 있지만, "
-                    if has_infra
-                    else "자전거를 보호할 시설이 없고, "
-                )
-                st.info(f"왜 위험할까요? {why}사고 이력과 도로 규모를 함께 반영했을 때 위험도가 높게 나온 구간이에요.")
+            has_infra = e.get("infra_bonus_component", 0) > 0
+            why = (
+                "자전거 보호시설은 있지만, "
+                if has_infra
+                else "자전거를 보호할 시설이 없고, "
+            )
+            road_desc = _road_description(e)
+            pct = (1 - rr.CITY_RISK_QUANTILE) * 100
 
-                c1, c2 = st.columns([1, 2.4])
-                with c1:
-                    st.metric("위험도", f"{e['risk_score'] * 100:.0f}점")
-                with c2:
-                    road_name = e.get("name") or "이름이 등록되지 않은 도로"
-                    pct = (1 - rr.CITY_RISK_QUANTILE) * 100
-                    st.caption(
-                        f"{road_name} · {e.get('highway') or '도로유형 미상'} · "
-                        f"길이 약 {e['length']:.0f}m · 창원시 전체 도로 중 상위 {pct:.0f}% 이내"
-                    )
+            # "보호시설" 항목은 원래 값이 높을수록(=보호시설이 잘 갖춰질수록) 위험도를
+            # "낮추는" 방향이라, 사고 이력·도로 규모(높을수록 위험도를 "높이는" 방향)와
+            # 막대 하나로 나란히 보여주면 방향이 반대로 읽혀 헷갈립니다.
+            # 그래서 "보호시설 부족" = 1 - 보호시설 로 뒤집어서, 세 막대 모두
+            # "길수록 위험도를 더 많이 끌어올린 요인"으로 방향을 통일했습니다.
+            infra_lack = 1.0 - min(max(e.get("infra_bonus_component", 0.0), 0.0), 1.0)
+            bars_html = (
+                _risk_bar_html("사고 이력", e.get("accident_component", 0.0))
+                + _risk_bar_html("도로 규모", e.get("hierarchy_component", 0.0))
+                + _risk_bar_html("보호시설 부족", infra_lack)
+            )
 
-                st.caption("점수 계산에 반영된 요소")
-                bc1, bc2, bc3 = st.columns(3)
-                with bc1:
-                    st.caption("사고 이력")
-                    st.progress(min(max(e.get("accident_component", 0.0), 0.0), 1.0))
-                with bc2:
-                    st.caption("도로 규모")
-                    st.progress(min(max(e.get("hierarchy_component", 0.0), 0.0), 1.0))
-                with bc3:
-                    st.caption("보호시설")
-                    st.progress(min(max(e.get("infra_bonus_component", 0.0), 0.0), 1.0))
+            st.markdown(
+                f"""
+                <div class="risk-alert-card">
+                    <div class="risk-alert-header">
+                        <img src="{rr.RISK_MARKER_ICON_DATA_URI}" class="risk-alert-icon" alt="위험 구간 아이콘">
+                        <span class="risk-alert-title">피할 수 없는 위험 구간</span>
+                    </div>
+                    <div class="risk-alert-lede">
+                        <strong>어떤 경로를 선택해도</strong> 이 구간은 반드시 지나가게 됩니다.
+                        대신할 다른 길이 없기 때문이에요.
+                    </div>
+                    <div class="risk-alert-why">
+                        ⚠️ 왜 위험할까요? {why}사고 이력과 도로 규모를 함께 반영했을 때 위험도가 높게 나온 구간이에요.
+                    </div>
+                    <div class="risk-alert-body">
+                        <div class="risk-score-block">
+                            <div class="risk-score-value">{e['risk_score'] * 100:.0f}<span class="risk-score-unit">점</span></div>
+                            <div class="risk-score-caption">위험도 · 창원시 전체 상위 {pct:.0f}% 이내</div>
+                        </div>
+                        <div class="risk-detail-block">
+                            <div class="risk-detail-road">{road_desc}</div>
+                            <div class="risk-detail-meta">길이 약 {e['length']:.0f}m · 창원시 전체 도로 중 위험도 상위 {pct:.0f}% 이내</div>
+                            <div class="risk-bar-hint">막대가 길수록 위험도를 더 많이 끌어올린 요인이에요</div>
+                            {bars_html}
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
             with st.expander("경로별 최고 위험 지점 보기"):
                 for key in ["shortest", "bike", "risk"]:
                     e = edges_by_route[key]
                     st.write(
                         f"{ROUTE_DOTS[key]} **{ROUTE_LABELS[key]}**: "
-                        f"위험도 {e['risk_score'] * 100:.0f}점 · "
-                        f"{e.get('name') or '이름 없는 도로'} ({e.get('highway') or '유형 미상'})"
+                        f"위험도 {e['risk_score'] * 100:.0f}점 · {_road_description(e)}"
                     )
 
         fmap = rr.build_comparison_map(

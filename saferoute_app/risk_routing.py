@@ -454,10 +454,26 @@ def compute_risk_scores(G,
     nodes, edges = ox.graph_to_gdfs(G, nodes=True, edges=True)
 
     # --- (1) 사고 근접도 컴포넌트 ---
-    if {"acc_dist_m", "acc_severity", "acc_density"}.issubset(edges.columns):
-        proximity = 1 / (1 + edges["acc_dist_m"].fillna(9999) / 100)
-        severity_w = 1 + np.log1p(edges["acc_severity"].fillna(0))
-        density_w = 1 + np.log1p(edges["acc_density"].fillna(0))
+    # 실제 체크포인트(changwon_G_full_with_risk.pkl)의 컬럼명은 노트북 쪽 조인 단계에서
+    # distance_to_accident_hotspot / nearest_hotspot_severity / hotspot_count_300m 로
+    # 저장돼 있습니다. 예전 이름(acc_dist_m 등)만 찾던 아래 조건이 항상 실패해서
+    # accident_component가 모든 구간에서 계속 0으로 나오고 있었습니다 (도로 위계·인프라만으로
+    # risk_score가 결정 — "위험도가 경로를 바꿔도 고정되어 보인다"던 문제의 원인).
+    # 두 이름 체계를 모두 지원하도록 매핑해서 고칩니다.
+    _dist_col = next(
+        (c for c in ("distance_to_accident_hotspot", "acc_dist_m") if c in edges.columns), None
+    )
+    _severity_col = next(
+        (c for c in ("nearest_hotspot_severity", "acc_severity") if c in edges.columns), None
+    )
+    _density_col = next(
+        (c for c in ("hotspot_count_300m", "hotspot_count_100m", "acc_density") if c in edges.columns),
+        None,
+    )
+    if _dist_col and _severity_col and _density_col:
+        proximity = 1 / (1 + edges[_dist_col].fillna(9999) / 100)
+        severity_w = 1 + np.log1p(edges[_severity_col].fillna(0))
+        density_w = 1 + np.log1p(edges[_density_col].fillna(0))
         accident_raw = proximity * severity_w * density_w
     else:
         accident_raw = pd.Series(0.0, index=edges.index)

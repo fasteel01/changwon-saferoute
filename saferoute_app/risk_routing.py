@@ -985,9 +985,38 @@ def _endpoint_marker(point, kind: str, place_label: str = ""):
     )
 
 
+def legend_html(visible_routes=None) -> str:
+    """지도 위가 아니라 지도 바로 위에 한 줄로 놓는 간단한 범례 (웹 앱용)."""
+    if visible_routes is None:
+        visible_routes = list(ROUTE_STYLE.keys())
+    pill = ("display:inline-block; border:2px solid {ink}; border-radius:999px; padding:0 7px; "
+            "font-weight:700; font-size:11px; line-height:16px; background:{bg}; color:{fg};")
+    items = [
+        f'<span style="{pill.format(ink=ENDPOINT_INK, bg=ENDPOINT_INK, fg="#fff")}">출발</span>'
+        f'<span style="{pill.format(ink=ENDPOINT_INK, bg="#fff", fg=ENDPOINT_INK)}; margin-left:4px;">도착</span>'
+    ]
+    for key, st_ in ROUTE_STYLE.items():
+        if key in visible_routes:
+            items.append(f'<span><span style="display:inline-block; width:16px; height:4px; border-radius:2px; '
+                         f'background:{st_["color"]}; vertical-align:middle; margin-right:5px;"></span>{st_["label"]}</span>')
+    items.append(f'<span><img src="{RISK_MARKER_ICON_DATA_URI}" style="width:15px; height:15px; '
+                 f'vertical-align:-3px; margin-right:4px;" alt="">피할 수 없는 위험 지점</span>')
+    items.append(f'<span><span style="display:inline-block; width:14px; height:14px; border-radius:50%; '
+                 f'background:{RISK_ZONE_COLOR}; color:#fff; font:800 10px/14px sans-serif; text-align:center; '
+                 f'vertical-align:-2px; margin-right:4px;">!</span>고위험 지점(일부 경로)</span>')
+    return (
+        '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:4px 14px; '
+        'font-size:12.5px; margin:4px 0 6px 0;">' + "".join(items) + "</div>"
+        '<div style="font-size:11px; color:#8a8a8a; margin-bottom:6px;">'
+        f"고위험 = 창원시 전체 도로 중 위험도 상위 {(1 - CITY_RISK_QUANTILE) * 100:.0f}% · "
+        "지도 위 지점을 누르면 경로별로 몇 m 지나는지 보여줘요</div>"
+    )
+
+
 def build_comparison_map(G_ssg, edges_ssg, routes, stats, orig_point, dest_point, utm_crs,
                           city_threshold: float, visible_routes=None,
-                          orig_label: str = "", dest_label: str = ""):
+                          orig_label: str = "", dest_label: str = "",
+                          show_legend: bool = True):
     """
     city_threshold: prepare_g_full()에서 계산된, 창원시 전체 기준 위험구간 임계값.
     visible_routes: 지도에 그릴 경로 키 목록 (기본값: 3개 전부).
@@ -1086,9 +1115,13 @@ def build_comparison_map(G_ssg, edges_ssg, routes, stats, orig_point, dest_point
         lons += [G_ssg.nodes[n]["x"] for n in r]
     # 왼쪽 아래 범례에 경로가 가리지 않도록 아래쪽 여백을 넉넉히 둡니다.
     fmap.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]],
-                    padding_top_left=(50, 50), padding_bottom_right=(50, 160))
+                    padding_top_left=(50, 50),
+                    padding_bottom_right=(50, 160 if show_legend else 50))
 
     # --- 범례 ---
+    # 웹 앱에서는 지도를 가리지 않도록 범례를 지도 밖(legend_html())에 그리므로 show_legend=False로 호출합니다.
+    if not show_legend:
+        return fmap
     legend_rows = "".join(
         f'<div><span style="display:inline-block;width:14px;height:4px;'
         f'background:{s["color"]};margin-right:6px;"></span>{s["label"]}</div>'

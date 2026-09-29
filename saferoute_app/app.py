@@ -566,5 +566,8 @@ with col_result:
             visible_routes=visible_routes,
             orig_label=(result.get("places") or {}).get("출발지", {}).get("label", ""),
             dest_label=(result.get("places") or {}).get("도착지", {}).get("label", ""),
+            show_legend=False,
         )
+        # 범례는 지도를 가리지 않도록 지도 바로 위에 한 줄로 표시
+        st.markdown(rr.legend_html(visible_routes), unsafe_allow_html=True)
         st_folium(fmap, width=None, height=600, use_container_width=True)

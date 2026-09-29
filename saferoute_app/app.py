@@ -23,6 +23,8 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
+import osmnx as ox
+
 import risk_routing as rr
 
 
@@ -268,12 +270,53 @@ def _road_description(e: dict) -> str:
     return f"{name} ({label})" if name else f"이름 없는 {label} 구간"
 
 
+PLACE_OPTIONS = list(rr.PLACES.keys())
+
+
+def place_input(label: str, default: str, key: str) -> str:
+    """
+    등록 장소 목록에서 고르거나(입력하면 비슷한 이름으로 걸러짐) 목록에 없는 장소를 직접 입력하는 칸.
+    오타가 나도 목록에서 비슷한 이름이 바로 보이므로, 지도에 없는 이름을 입력할 가능성을 줄여줍니다.
+    구버전 Streamlit에서는 일반 입력칸으로 대체합니다.
+    """
+    kwargs = dict(
+        options=PLACE_OPTIONS, index=PLACE_OPTIONS.index(default), key=key,
+        placeholder="장소 이름을 입력하거나 목록에서 고르세요",
+        help="목록에 없는 장소도 입력할 수 있어요. 도로명 주소보다는 건물·장소 이름이 정확해요.",
+    )
+    try:
+        return st.selectbox(label, accept_new_options=True, filter_mode="fuzzy", **kwargs)
+    except TypeError:
+        try:
+            return st.selectbox(label, accept_new_options=True, **kwargs)
+        except TypeError:
+            return st.text_input(label, value=default, key=f"{key}_text")
+
+
+def get_kakao_key():
+    """
+    카카오 REST API 키 (Streamlit Cloud: Settings → Secrets / 로컬: .streamlit/secrets.toml).
+    키는 절대 코드나 GitHub에 올리지 않습니다. 없으면 None → OSM 검색으로 동작합니다.
+    """
+    try:
+        return st.secrets.get("KAKAO_REST_API_KEY")
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def cached_search_place(query: str, _kakao_key) -> dict:
+    # 같은 장소를 반복 검색할 때 외부 검색 서버를 다시 부르지 않도록 하루 동안 기억합니다
+    # (오류는 캐시되지 않음). 인자 이름 앞의 _ 는 키 값을 캐시 식별에 쓰지 않는다는 뜻입니다.
+    return rr.search_place(query, _kakao_key)
+
+
 col_input, col_result = st.columns([1, 2.2], gap="large")
 
 with col_input:
     st.subheader("출발지 · 도착지")
-    origin_text = st.text_input("출발지", value="창원시청")
-    dest_text = st.text_input("도착지", value="창원대학교")
+    origin_text = place_input("출발지", "창원시청", "origin")
+    dest_text = place_input("도착지", "창원대학교", "dest")
     run = st.button("경로 비교하기", type="primary", use_container_width=True)
 
     st.divider()
@@ -303,11 +346,29 @@ with col_result:
             st.error(str(e))
             st.stop()
 
-        try:
-            with st.spinner("출발 · 도착지 확인 중..."):
-                orig_point = rr.geocode_point(origin_text)
-                dest_point = rr.geocode_point(dest_text)
+        # --- 1) 출발지·도착지 찾기 (오타·지도에 없는 장소·검색 서버 장애를 여기서 걸러냄) ---
+        places, geo_errors = {}, []
+        with st.spinner("출발 · 도착지 확인 중..."):
+            for role, text in [("출발지", origin_text), ("도착지", dest_text)]:
+                try:
+                    places[role] = cached_search_place(text or "", get_kakao_key())
+                except rr.GeocodeError as ge:
+                    geo_errors.append((role, ge))
+        if geo_errors:
+            for role, ge in geo_errors:
+                st.error(f"**{role}**: {ge.message}")
+                if ge.suggestions:
+                    st.info(f"혹시 이 장소를 찾으셨나요? **{' · '.join(ge.suggestions)}** (왼쪽 목록에서 고를 수 있어요)")
+            st.stop()
 
+        o, d = places["출발지"], places["도착지"]
+        orig_point, dest_point = (o["lat"], o["lon"]), (d["lat"], d["lon"])
+        if ox.distance.great_circle(o["lat"], o["lon"], d["lat"], d["lon"]) < 100:
+            st.error("출발지와 도착지가 같거나 100m 이내로 너무 가까워요. 다른 도착지를 입력해 주세요.")
+            st.stop()
+
+        # --- 2) 경로 계산 ---
+        try:
             with st.spinner("경로 주변 도로 그래프 추출 중..."):
                 G_ssg, utm_crs, od_dist_m = rr.extract_od_subgraph(G_full, orig_point, dest_point)
                 edges_ssg = rr.get_edges_gdf(G_ssg)
@@ -316,11 +377,21 @@ with col_result:
                 routes, stats, orig_node, dest_node = rr.compute_three_routes(
                     G_ssg, orig_point, dest_point
                 )
-        except Exception as e:
-            st.error(f"경로 계산 중 오류가 발생했습니다: {e}")
+        except Exception:
+            st.error("두 지점을 잇는 자전거 경로를 찾지 못했어요. 도로와 연결되지 않은 곳(섬·산 속 등)이거나 "
+                     "시범 구간에서 너무 먼 곳일 수 있어요. 다른 장소로 다시 시도해 주세요.")
             st.stop()
 
+        # --- 3) 입력 위치가 도로망에서 너무 멀리 떨어져 있지 않은지 확인 ---
+        for role, point, node in [("출발지", orig_point, orig_node), ("도착지", dest_point, dest_node)]:
+            ok, snap_m = rr.validate_snap(G_ssg, point, node, max_dist_m=300)
+            if not ok:
+                st.error(f"**{role}**에서 가장 가까운 도로까지 약 {snap_m:.0f}m 떨어져 있어요. "
+                         "도로망 밖의 위치로 보이니, 가까운 건물·장소 이름으로 다시 입력해 주세요.")
+                st.stop()
+
         st.session_state["last_result"] = {
+            "places": places,
             "routes": routes,
             "stats": stats,
             "G_ssg": G_ssg,
@@ -339,6 +410,17 @@ with col_result:
         stats = result["stats"]
         G_ssg = result["G_ssg"]
         city_threshold = result["city_threshold"]
+
+        # 실제로 어느 위치로 인식했는지 보여줘서, 사용자가 잘못 잡힌 위치를 바로 알아챌 수 있게 합니다.
+        places = result.get("places")
+        if places:
+            def _src(p):
+                return {"registered": "등록 장소", "kakao": "카카오 검색", "osm": "지도 검색"}.get(p["source"], "지도 검색")
+            po, pd_ = places["출발지"], places["도착지"]
+            st.caption(f"📍 출발: **{po['label']}** ({_src(po)})  →  도착: **{pd_['label']}** ({_src(pd_)})")
+            for role, p in places.items():
+                if p.get("warning"):
+                    st.warning(f"**{role}**: {p['warning']}")
 
         metric_cols = st.columns(3)
         for col, key in zip(metric_cols, ["shortest", "bike", "risk"]):

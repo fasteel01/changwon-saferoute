@@ -24,6 +24,8 @@ app.py(Streamlit)에서 이 모듈을 import해서 사용합니다.
 """
 
 import os
+import re
+import difflib
 import pickle
 
 import numpy as np
@@ -253,12 +255,59 @@ RISK_MARKER_ICON_DATA_URI = "data:image/png;base64," + RISK_MARKER_ICON_B64
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 PATH_G_FULL = os.path.join(_MODULE_DIR, "changwon_G_full_with_risk.pkl")
 
-# 학과서버 네트워크가 끊겨도 데모가 가능하도록, 자주 쓰는 지점은 좌표를 하드코딩해둡니다.
-# (Nominatim 지오코딩은 네트워크 상태에 따라 실패할 수 있음)
-DEMO_LOCATIONS = {
+# 자주 찾는 장소는 좌표를 미리 등록해 둡니다 (좌표: OpenStreetMap Nominatim 검색 결과, 2026.9. 확인).
+#  - 등록 장소는 외부 검색 서버를 거치지 않으므로 즉시 응답하고, 서버 장애·속도 제한과 무관하게 동작합니다.
+#  - 오타 입력 시 "혹시 이 장소인가요?" 추천 후보로도 사용합니다.
+PLACES = {
+    # 성산구·의창구 (시범 구간)
     "창원시청": (35.2275036, 128.682374),
     "창원대학교": (35.2448472, 128.6951022),
+    "창원중앙역": (35.242367, 128.701193),
+    "창원역": (35.257585, 128.607013),
+    "경상남도청": (35.237865, 128.691872),
+    "창원광장": (35.226347, 128.682189),
+    "용지공원(용지호수)": (35.232475, 128.680904),
+    "상남시장": (35.222238, 128.683368),
+    "가음정공원": (35.212232, 128.686997),
+    "가음정시장": (35.207534, 128.697875),
+    "반송시장": (35.236120, 128.671879),
+    "창원컨벤션센터": (35.238588, 128.656693),
+    "창원종합운동장": (35.235431, 128.665418),
+    "창원체육관": (35.232699, 128.666269),
+    "성산아트홀": (35.229582, 128.682088),
+    "롯데백화점 창원점": (35.224607, 128.681842),
+    "정우상가": (35.228128, 128.679455),
+    "올림픽공원": (35.225321, 128.659414),
+    "창원문성대학교": (35.234695, 128.660866),
+    "창원과학체험관": (35.230226, 128.661921),
+    "창원기계공업고등학교": (35.224961, 128.665757),
+    "파티마병원": (35.237019, 128.646896),
+    "창원종합버스터미널": (35.236299, 128.639438),
+    "의창구청": (35.255637, 128.634964),
+    "성산구청": (35.198503, 128.702513),
+    # 마산·진해 (시범 구간 밖이지만 경로 계산 가능)
+    "마산역": (35.236367, 128.580728),
+    "마산고속버스터미널": (35.223010, 128.588128),
+    "삼성창원병원": (35.242636, 128.591048),
+    "경남대학교": (35.181582, 128.553198),
+    "진해역": (35.153477, 128.660151),
 }
+# 같은 장소를 부르는 다른 이름
+PLACE_ALIASES = {
+    "시청": "창원시청", "창원대": "창원대학교", "도청": "경상남도청", "경남도청": "경상남도청",
+    "용지호수": "용지공원(용지호수)", "용지호수공원": "용지공원(용지호수)", "용지공원": "용지공원(용지호수)",
+    "창원파티마병원": "파티마병원", "창원컨벤션": "창원컨벤션센터", "세코": "창원컨벤션센터", "CECO": "창원컨벤션센터",
+    "롯데백화점": "롯데백화점 창원점", "창원버스터미널": "창원종합버스터미널", "창원터미널": "창원종합버스터미널",
+    "마산터미널": "마산고속버스터미널", "경남대": "경남대학교", "문성대": "창원문성대학교",
+}
+# 이전 버전 호환 (app.py 등에서 DEMO_LOCATIONS를 참조하던 코드용)
+DEMO_LOCATIONS = PLACES
+
+# 창원시 도로망 범위 (지오코딩 결과를 이 범위 안으로 제한)
+CHANGWON_VIEWBOX = (128.35, 35.05, 128.85, 35.40)  # (서, 남, 동, 북)
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_TIMEOUT_S = 6
+NOMINATIM_HEADERS = {"User-Agent": "nubija-saferoute/1.0 (+https://github.com/fasteel01/changwon-saferoute)"}
 
 # 도로 위계 -> 위험 기여도 (사고/자전거 인프라 태그가 없을 때의 대리 지표)
 HIERARCHY_WEIGHT_MAP = {
@@ -343,15 +392,222 @@ def prepare_g_full(path: str = PATH_G_FULL, risk_quantile: float = CITY_RISK_QUA
 # 2. 지오코딩
 # --------------------------------------------------------------------------
 
-def geocode_point(query: str):
-    """장소 이름 -> (lat, lon). DEMO_LOCATIONS에 있으면 그 값을 우선 사용합니다."""
-    q = query.strip()
-    if q in DEMO_LOCATIONS:
-        return DEMO_LOCATIONS[q]
-    # 데모 지점이 아니면 실시간 지오코딩 시도 (네트워크 필요)
-    query_full = q if "창원" in q else f"{q}, 창원시"
-    lat, lon = ox.geocode(query_full)
-    return (lat, lon)
+class GeocodeError(Exception):
+    """사용자에게 그대로 보여줄 수 있는 위치 검색 오류. suggestions: 비슷한 등록 장소 이름."""
+
+    def __init__(self, message: str, suggestions=None):
+        super().__init__(message)
+        self.message = message
+        self.suggestions = list(suggestions or [])
+
+
+def _norm_name(text: str) -> str:
+    return re.sub(r"\s+", "", str(text)).lower()
+
+
+_PLACE_LOOKUP = {_norm_name(n): n for n in PLACES}
+_PLACE_LOOKUP.update({_norm_name(a): n for a, n in PLACE_ALIASES.items()})
+
+# "중앙대로 151", "창이대로263번길 12"처럼 도로명 + 건물번호 형태의 입력
+_ROAD_ADDRESS_RE = re.compile(r"(로|길)\s*\d+(-\d+)?\s*$")
+
+
+def suggest_places(query: str, n: int = 3):
+    """오타가 난 입력과 비슷한 등록 장소 이름을 찾습니다."""
+    q = _norm_name(query).replace("창원시", "")
+    if not q:
+        return []
+    keys = list(_PLACE_LOOKUP.keys())
+    hits = difflib.get_close_matches(q, keys, n=n * 2, cutoff=0.5)
+    # 부분 일치(예: "가음정" -> "가음정공원", "가음정시장")도 후보로
+    hits += [k for k in keys if q in k or (len(k) >= 2 and k in q)]
+    out = []
+    for k in hits:
+        name = _PLACE_LOOKUP[k]
+        if name not in out:
+            out.append(name)
+    return out[:n]
+
+
+KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+KAKAO_ADDRESS_URL = "https://dapi.kakao.com/v2/local/search/address.json"
+KAKAO_TIMEOUT_S = 5
+
+
+class _KakaoUnavailable(Exception):
+    """카카오 검색을 쓸 수 없는 상황(키 오류·서버 장애 등) → OSM 검색으로 넘어감."""
+
+
+def _in_changwon(lat: float, lon: float) -> bool:
+    west, south, east, north = CHANGWON_VIEWBOX
+    return south <= lat <= north and west <= lon <= east
+
+
+def _kakao_get(url: str, params: dict, key: str) -> list:
+    import requests
+    try:
+        resp = requests.get(url, params=params, headers={"Authorization": f"KakaoAK {key}"},
+                            timeout=KAKAO_TIMEOUT_S)
+    except requests.RequestException as e:
+        raise _KakaoUnavailable(f"network: {e}")
+    if resp.status_code != 200:
+        # 401: 키 오류 / 403: 카카오맵 사용 설정 꺼짐 / 429: 쿼터 초과 → 로그에 남기고 OSM으로 대체
+        print(f"[kakao] HTTP {resp.status_code}: {resp.text[:200]}")
+        raise _KakaoUnavailable(f"http {resp.status_code}")
+    try:
+        return resp.json().get("documents", []) or []
+    except ValueError:
+        raise _KakaoUnavailable("bad json")
+
+
+def _search_kakao(q: str, key: str):
+    """
+    카카오 로컬 API로 검색합니다. 찾으면 dict, 창원시 안에서 못 찾으면 None.
+      - 도로명/지번 주소처럼 보이면 주소 검색을 먼저, 아니면 키워드(장소명) 검색을 먼저 시도
+      - 결과는 창원시 범위 안의 것만 사용
+    """
+    west, south, east, north = CHANGWON_VIEWBOX
+
+    def keyword():
+        docs = _kakao_get(KAKAO_KEYWORD_URL,
+                          {"query": q, "rect": f"{west},{south},{east},{north}", "size": 5}, key)
+        for d in docs:
+            lat, lon = float(d["y"]), float(d["x"])
+            if _in_changwon(lat, lon):
+                addr = d.get("road_address_name") or d.get("address_name") or ""
+                return {"lat": lat, "lon": lon, "label": f"{d.get('place_name', q)} · {addr}".strip(" ·"),
+                        "source": "kakao", "precision": "place", "warning": None}
+        return None
+
+    def address():
+        query = q if ("창원" in q or "경남" in q or "경상남도" in q) else f"창원시 {q}"
+        docs = _kakao_get(KAKAO_ADDRESS_URL, {"query": query, "size": 5}, key)
+        for d in docs:
+            lat, lon = float(d["y"]), float(d["x"])
+            if not _in_changwon(lat, lon):
+                continue
+            atype = d.get("address_type", "")
+            warning, precision = None, "place"
+            if atype == "REGION":
+                precision = "area"
+                warning = (f"'{d.get('address_name', q)}' 지역의 중심점으로 잡혔어요. "
+                           "동네 이름보다는 건물·장소 이름이나 정확한 주소로 입력하면 더 정확해요.")
+            elif atype == "ROAD":
+                precision = "road"
+                warning = (f"'{d.get('address_name', q)}' 도로 위의 한 지점으로 잡혔어요. "
+                           "건물번호까지 입력하면 더 정확해요.")
+            return {"lat": lat, "lon": lon, "label": d.get("address_name", q), "source": "kakao",
+                    "precision": precision, "warning": warning}
+        return None
+
+    looks_like_address = bool(_ROAD_ADDRESS_RE.search(q)) or bool(re.search(r"\d+(-\d+)?\s*번지?$", q))
+    order = (address, keyword) if looks_like_address else (keyword, address)
+    for fn in order:
+        found = fn()
+        if found:
+            return found
+    return None
+
+
+def search_place(query: str, kakao_key: str = None) -> dict:
+    """
+    장소 이름(또는 주소) -> 위치 정보 dict.
+      {"lat", "lon", "label"(화면 표시용 이름),
+       "source": "registered" | "kakao" | "osm",
+       "precision": "place" | "road"(도로 위 임의 지점) | "area"(동네 중심점),
+       "warning": str | None}
+
+    1) 등록 장소(PLACES/PLACE_ALIASES)면 외부 서버 없이 즉시 반환
+    2) 카카오 REST API 키가 있으면 카카오 로컬 검색 (장소명·도로명 주소 모두 건물 단위로 정확)
+    3) 키가 없거나 카카오를 쓸 수 없으면 OpenStreetMap Nominatim 검색 (6초 제한, 재시도 없음)
+       - 이전에는 ox.geocode()를 썼는데, 공용 서버가 요청을 제한하면 OSMnx가 재시도를
+         반복하면서 화면이 무한 로딩되는 문제가 있어 직접 호출 + 짧은 제한시간으로 바꿨습니다.
+    4) 어디서도 찾지 못하면 GeocodeError(비슷한 등록 장소 추천 포함)를 발생
+    """
+    q = str(query or "").strip()
+    if not q:
+        raise GeocodeError("장소를 입력해 주세요.")
+
+    name = _PLACE_LOOKUP.get(_norm_name(q))
+    if name:
+        lat, lon = PLACES[name]
+        return {"lat": lat, "lon": lon, "label": name, "source": "registered",
+                "precision": "place", "warning": None}
+
+    if kakao_key:
+        try:
+            found = _search_kakao(q, kakao_key)
+        except _KakaoUnavailable:
+            found = None  # 카카오 장애 시 OSM으로 대체
+        else:
+            if found is None:
+                raise GeocodeError(
+                    f"'{q}'을(를) 창원시 안에서 찾지 못했어요. 오타가 없는지 확인하거나 다른 이름으로 입력해 주세요.",
+                    suggest_places(q),
+                )
+        if found:
+            return found
+
+    return _search_osm(q)
+
+
+def _search_osm(q: str) -> dict:
+    """OpenStreetMap Nominatim 검색 (카카오 키가 없거나 카카오 검색이 실패했을 때의 대체 수단)."""
+    import requests  # osmnx 의존성으로 이미 설치되어 있음
+
+    west, south, east, north = CHANGWON_VIEWBOX
+    params = {
+        "q": q if "창원" in q else f"{q}, 창원시",
+        "format": "jsonv2", "limit": 1, "countrycodes": "kr", "accept-language": "ko",
+        "viewbox": f"{west},{north},{east},{south}", "bounded": 1,
+    }
+    try:
+        resp = requests.get(NOMINATIM_URL, params=params, headers=NOMINATIM_HEADERS,
+                            timeout=NOMINATIM_TIMEOUT_S)
+    except requests.RequestException:
+        raise GeocodeError(
+            "위치 검색 서버가 응답하지 않아요. 잠시 후 다시 시도하거나, 목록에 있는 장소를 선택해 주세요.",
+            suggest_places(q),
+        )
+    if resp.status_code != 200:
+        raise GeocodeError(
+            "위치 검색 요청이 많아 잠시 제한되었어요. 잠시 후 다시 시도하거나, 목록에 있는 장소를 선택해 주세요.",
+            suggest_places(q),
+        )
+    try:
+        results = resp.json()
+    except ValueError:
+        results = []
+    if not results:
+        raise GeocodeError(
+            f"'{q}'을(를) 창원시 안에서 찾지 못했어요. 오타가 없는지 확인하거나 다른 이름으로 입력해 주세요.",
+            suggest_places(q),
+        )
+
+    top = results[0]
+    lat, lon = float(top["lat"]), float(top["lon"])
+    parts = [p.strip() for p in str(top.get("display_name", q)).split(",")]
+    label = " · ".join(parts[:3])
+    is_road = top.get("category") == "highway" and top.get("type") != "bus_stop"
+    warning = None
+    if is_road:
+        road = parts[0] if parts else q
+        if _ROAD_ADDRESS_RE.search(q):
+            warning = (f"도로명 주소의 건물번호는 인식하지 못해, '{road}' 도로 위의 한 지점으로 잡혔어요. "
+                       "실제 위치와 수백 m 이상 차이가 날 수 있으니, 정확한 위치가 필요하면 장소 이름(예: 창원시청)으로 입력해 주세요.")
+        else:
+            warning = (f"'{road}' 도로 위의 한 지점으로 잡혔어요. 도로가 길면 원하는 위치와 차이가 날 수 있으니, "
+                       "가능하면 건물·장소 이름으로 입력해 주세요.")
+    return {"lat": lat, "lon": lon, "label": label, "source": "osm",
+            "precision": "road" if is_road else "place", "warning": warning}
+
+
+
+
+def geocode_point(query: str, kakao_key: str = None):
+    """장소 이름 -> (lat, lon). 이전 버전 호환용 래퍼 (실패 시 GeocodeError)."""
+    p = search_place(query, kakao_key)
+    return (p["lat"], p["lon"])
 
 
 # --------------------------------------------------------------------------

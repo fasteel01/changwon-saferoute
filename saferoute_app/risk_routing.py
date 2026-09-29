@@ -35,7 +35,6 @@ import osmnx as ox
 import geopandas as gpd
 from shapely.geometry import LineString, Point
 from shapely import offset_curve
-from shapely.ops import unary_union
 import folium
 
 # 지도 위 "피할 수 없는 위험 구간" 마커 아이콘.
@@ -342,7 +341,7 @@ BIKE_PENALTY = 3.0    # 자전거 인프라 없는 구간에 곱해지는 거리
 K_RISK = 2.0          # risk_score가 비용에 반영되는 강도 (cost_risk_aware)
 
 CITY_RISK_QUANTILE = 0.95  # "위험구간"으로 강조 표시할 창원시 전체 기준 상위 분위
-CORRIDOR_BUFFER_M = 250    # 위험구간을 후보 경로 주변 몇 m 안에서만 보여줄지
+CORRIDOR_BUFFER_M = 250    # (이전 버전) 경로 주변 위험구간 표시 반경 — 현재는 경로가 실제로 지나는 구간만 표시
 
 # 예상 소요시간 계산용 평균 주행속도 가정치.
 # 실측 주행속도 데이터(예: 누비자 실제 GPS 로그)가 없어서 쓰는 근사값이며,
@@ -916,6 +915,7 @@ def cluster_high_risk_edges(edges_high: gpd.GeoDataFrame):
             "n_edges": int(len(dedup)),
             "highway": _first_if_list(max_row.get("highway")),
             "names": names,
+            "edges": set(component),  # 이 지점에 묶인 구간들 (u, v, key)
         })
     return clusters
 
@@ -946,8 +946,48 @@ def offset_route_latlon(G, route, utm_crs, offset_m):
     return [(lat, lon) for lon, lat in line_wgs84.coords]
 
 
+ENDPOINT_INK = "#1f2937"  # 출발/도착 표시색: 경로색(파랑·초록·빨강)·위험 지점(주황)과 겹치지 않는 짙은 회색
+
+
+def _short_label(text: str, n: int = 14) -> str:
+    text = str(text or "").split(" · ")[0].strip()
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _endpoint_marker(point, kind: str, place_label: str = ""):
+    """
+    출발/도착 지점을 글자가 보이는 핀으로 표시합니다.
+    예전의 파란/빨간 기본 핀은 경로색(최단거리=파랑, AI 안전경로=빨강)과 겹쳐서
+    어느 쪽이 출발이고 도착인지 헷갈렸기 때문에, 경로와 겹치지 않는 짙은 회색으로
+    "출발"/"도착" 글자를 직접 보여줍니다 (출발=채운 핀, 도착=테두리 핀).
+    """
+    is_start = kind == "start"
+    word = "출발" if is_start else "도착"
+    name = _short_label(place_label)
+    text = f"{word} · {name}" if name else word
+    bg, fg = (ENDPOINT_INK, "#ffffff") if is_start else ("#ffffff", ENDPOINT_INK)
+    html = f"""
+    <div style="position:absolute; transform:translate(-50%, -100%); display:flex;
+                flex-direction:column; align-items:center; pointer-events:auto;">
+      <div style="background:{bg}; color:{fg}; border:2px solid {ENDPOINT_INK};
+                  border-radius:999px; padding:3px 10px; font:700 12px/1.3 sans-serif;
+                  white-space:nowrap; box-shadow:0 1px 4px rgba(0,0,0,0.35);">{text}</div>
+      <div style="width:0; height:0; border-left:6px solid transparent;
+                  border-right:6px solid transparent; border-top:8px solid {ENDPOINT_INK};"></div>
+      <div style="width:10px; height:10px; margin-top:-2px; border-radius:50%;
+                  background:{bg}; border:2px solid {ENDPOINT_INK};"></div>
+    </div>"""
+    return folium.Marker(
+        point,
+        icon=folium.DivIcon(html=html, icon_size=(1, 1), icon_anchor=(0, -5)),
+        tooltip=f"{word}: {place_label}" if place_label else word,
+        z_index_offset=1000,
+    )
+
+
 def build_comparison_map(G_ssg, edges_ssg, routes, stats, orig_point, dest_point, utm_crs,
-                          city_threshold: float, visible_routes=None):
+                          city_threshold: float, visible_routes=None,
+                          orig_label: str = "", dest_label: str = ""):
     """
     city_threshold: prepare_g_full()에서 계산된, 창원시 전체 기준 위험구간 임계값.
     visible_routes: 지도에 그릴 경로 키 목록 (기본값: 3개 전부).
@@ -978,46 +1018,75 @@ def build_comparison_map(G_ssg, edges_ssg, routes, stats, orig_point, dest_point
             tooltip=style["label"], popup=popup,
         ).add_to(fmap)
 
-    # --- 위험구간: 창원시 전체 기준 상위 분위 & 후보 경로 250m 코리더 안 & 지점(클러스터) 단위 ---
-    # 코리더는 토글 상태와 무관하게 항상 3개 경로 전체를 기준으로 계산합니다
-    # (경로를 껐다 켰다 할 때 위험구간 표시가 같이 흔들리지 않도록).
-    route_lines_proj = []
-    for key in routes:
-        latlon = offset_route_latlon(G_ssg, routes[key], utm_crs, 0)
-        line = LineString([(lon, lat) for lat, lon in latlon])
-        route_lines_proj.append(gpd.GeoSeries([line], crs="EPSG:4326").to_crs(utm_crs).iloc[0])
-    corridor = unary_union(route_lines_proj).buffer(CORRIDOR_BUFFER_M)
+    # --- 위험 지점: 세 경로가 "실제로 지나가는" 고위험 구간만 지점(클러스터) 단위로 표시 ---
+    # 예전에는 경로 주변 250m 안의 고위험 구간을 모두 표시했는데, 그러면 AI 안전경로가
+    # 큰 도로를 "가로지르기만" 해도 그 도로의 위험 지점이 경로 옆에 찍혀서, 실제로는 위험 구간을
+    # 가장 적게 지나는 AI 경로 주변에 마커가 더 많아 보이는 착시가 생겼습니다.
+    # 이제는 경로가 실제로 달리는 구간만 표시하고, 지점마다 어느 경로가 몇 m 지나는지 알려줍니다.
+    route_weight = {"shortest": "length", "bike": "cost_bike_priority", "risk": "cost_risk_aware"}
+    traversed = {}  # (u, v, key) -> {route_key: length}
+    for rkey, route in routes.items():
+        w = route_weight.get(rkey, "length")
+        for u, v in zip(route[:-1], route[1:]):
+            data = G_ssg.get_edge_data(u, v)
+            k = min(data, key=lambda kk: data[kk].get(w, data[kk].get("length", 0)))
+            d = data[k]
+            if d.get("risk_score", 0.0) >= city_threshold:
+                traversed.setdefault((u, v, k), {})[rkey] = d.get("length", 0.0)
 
-    edges_proj = edges_ssg.to_crs(utm_crs)
-    high_risk_nearby = edges_ssg[
-        (edges_ssg["risk_score"] >= city_threshold) & (edges_proj.geometry.intersects(corridor))
-    ]
-    clusters = cluster_high_risk_edges(high_risk_nearby)
+    hi_idx = [i for i in traversed if i in edges_ssg.index]
+    clusters = cluster_high_risk_edges(edges_ssg.loc[hi_idx]) if hi_idx else []
 
     for c in clusters:
-        popup_lines = [
-            f"위험도 {c['max_risk'] * 100:.0f}점",
-            f"구간 길이 약 {c['total_length']:.0f}m",
-        ]
-        if c["names"]:
-            popup_lines.append(", ".join(c["names"][:2]))
-        # "🚧 피할 수 없는 위험 구간" 패널과 같은 바리케이드 아이콘을 지도 마커로 사용해서
-        # 사용자가 패널과 지도 위 표시를 같은 의미로 바로 연결할 수 있게 합니다.
-        icon = folium.CustomIcon(
-            icon_image=RISK_MARKER_ICON_DATA_URI,
-            icon_size=(34, 32),
-            icon_anchor=(17, 30),
-        )
-        folium.Marker(
-            location=(c["lat"], c["lon"]),
-            icon=icon,
-            tooltip=f"🚧 위험도 {c['max_risk'] * 100:.0f}점 · 약 {c['total_length']:.0f}m 구간",
-            popup="<br>".join(popup_lines),
-        ).add_to(fmap)
+        by_route = {}
+        for e in c["edges"]:
+            for rkey, length in traversed.get(e, {}).items():
+                by_route[rkey] = by_route.get(rkey, 0.0) + length
+        unavoidable = all(k in by_route for k in routes)
+        route_lines = []
+        for rkey, style in ROUTE_STYLE.items():
+            if rkey not in routes:
+                continue
+            m = by_route.get(rkey)
+            route_lines.append(f"{style['label']}: " + (f"약 {m:.0f}m 통과" if m else "지나지 않음"))
+        title = "🚧 피할 수 없는 위험 지점" if unavoidable else "⚠️ 고위험 지점"
+        detail = f"위험도 {c['max_risk'] * 100:.0f}점" + (f" · {', '.join(c['names'][:2])}" if c["names"] else "")
+        popup_html = f"<b>{title}</b><br>{detail}<br>" + "<br>".join(route_lines)
+        tooltip = f"{title} · {detail}"
+        near_endpoint = min(
+            ox.distance.great_circle(c["lat"], c["lon"], orig_point[0], orig_point[1]),
+            ox.distance.great_circle(c["lat"], c["lon"], dest_point[0], dest_point[1]),
+        ) < 120
+        if unavoidable:
+            # "피할 수 없는 위험 구간" 패널과 같은 바리케이드 아이콘.
+            # 출발·도착 핀 바로 옆이면 핀 글자(위쪽)에 가려지지 않도록 지점의 오른쪽에 붙여 그립니다.
+            icon = folium.CustomIcon(icon_image=RISK_MARKER_ICON_DATA_URI, icon_size=(34, 32),
+                                     icon_anchor=(-10, 16) if near_endpoint else (17, 30))
+        else:
+            icon = folium.DivIcon(
+                html=(f'<div style="transform:translate(-50%,-50%); width:22px; height:22px; '
+                      f'border-radius:50%; background:{RISK_ZONE_COLOR}; border:2px solid #fff; '
+                      f'box-shadow:0 1px 3px rgba(0,0,0,0.4); color:#fff; font:800 13px/22px sans-serif; '
+                      f'text-align:center;">!</div>'),
+                icon_size=(1, 1), icon_anchor=(0, 0))
+        folium.Marker(location=(c["lat"], c["lon"]), icon=icon, tooltip=tooltip,
+                      popup=folium.Popup(popup_html, max_width=260),
+                      z_index_offset=2000 if unavoidable else 500).add_to(fmap)
 
     # --- 출발/도착 마커 ---
-    folium.Marker(orig_point, tooltip="출발", icon=folium.Icon(color="blue")).add_to(fmap)
-    folium.Marker(dest_point, tooltip="도착", icon=folium.Icon(color="red")).add_to(fmap)
+    _endpoint_marker(orig_point, "start", orig_label).add_to(fmap)
+    _endpoint_marker(dest_point, "end", dest_label).add_to(fmap)
+
+    # 출발·도착과 세 경로가 모두 한 화면에 들어오도록 지도 범위를 맞춥니다
+    # (고정 줌이면 먼 거리 경로에서 출발·도착 핀이 화면 밖으로 나가 어디가 어딘지 알 수 없음).
+    lats = [orig_point[0], dest_point[0]]
+    lons = [orig_point[1], dest_point[1]]
+    for r in routes.values():
+        lats += [G_ssg.nodes[n]["y"] for n in r]
+        lons += [G_ssg.nodes[n]["x"] for n in r]
+    # 왼쪽 아래 범례에 경로가 가리지 않도록 아래쪽 여백을 넉넉히 둡니다.
+    fmap.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]],
+                    padding_top_left=(50, 50), padding_bottom_right=(50, 160))
 
     # --- 범례 ---
     legend_rows = "".join(
@@ -1030,11 +1099,24 @@ def build_comparison_map(G_ssg, edges_ssg, routes, stats, orig_point, dest_point
                 background: white; padding: 10px 14px; border-radius: 8px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.25); font-size: 13px;
                 font-family: sans-serif; color:#333;">
+        <div style="display:flex; gap:10px; margin-bottom:6px;">
+            <span style="background:{ENDPOINT_INK}; color:#fff; border:2px solid {ENDPOINT_INK};
+                  border-radius:999px; padding:0 8px; font-weight:700; font-size:12px;">출발</span>
+            <span style="background:#fff; color:{ENDPOINT_INK}; border:2px solid {ENDPOINT_INK};
+                  border-radius:999px; padding:0 8px; font-weight:700; font-size:12px;">도착</span>
+        </div>
         {legend_rows}
-        <div style="margin-top:4px; display:flex; align-items:center;">
+        <div style="margin-top:6px; display:flex; align-items:center;">
             <img src="{RISK_MARKER_ICON_DATA_URI}" style="width:16px;height:16px;
-            margin-right:6px;" alt="위험 지점 아이콘">피할 수 없는 위험 지점 (창원시 전체 상위
-            {(1 - CITY_RISK_QUANTILE) * 100:.0f}%)
+            margin-right:6px;" alt="">피할 수 없는 위험 지점 (세 경로 모두 통과)
+        </div>
+        <div style="margin-top:3px; display:flex; align-items:center;">
+            <span style="display:inline-block; width:14px; height:14px; border-radius:50%;
+                  background:{RISK_ZONE_COLOR}; color:#fff; font:800 10px/14px sans-serif;
+                  text-align:center; margin-right:8px;">!</span>고위험 지점 (일부 경로만 통과)
+        </div>
+        <div style="margin-top:3px; color:#777; font-size:11px;">
+            고위험 = 창원시 전체 도로 중 위험도 상위 {(1 - CITY_RISK_QUANTILE) * 100:.0f}% · 지점을 누르면 경로별 통과 거리
         </div>
     </div>
     """

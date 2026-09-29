@@ -417,7 +417,23 @@ with col_result:
             def _src(p):
                 return {"registered": "등록 장소", "kakao": "카카오 검색", "osm": "지도 검색"}.get(p["source"], "지도 검색")
             po, pd_ = places["출발지"], places["도착지"]
-            st.caption(f"📍 출발: **{po['label']}** ({_src(po)})  →  도착: **{pd_['label']}** ({_src(pd_)})")
+            ink = rr.ENDPOINT_INK
+            pill = ("display:inline-block; border:2px solid {ink}; border-radius:999px; padding:1px 10px; "
+                    "font-weight:700; font-size:0.85rem; margin-right:6px; background:{bg}; color:{fg};")
+            st.markdown(
+                f"""
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px;
+                            padding:10px 14px; border:1px solid rgba(128,128,128,0.25);
+                            border-radius:10px; margin-bottom:12px;">
+                  <span><span style="{pill.format(ink=ink, bg=ink, fg='#fff')}">출발</span>
+                        <b>{po['label']}</b> <span style="color:#8a8a8a; font-size:0.8rem;">({_src(po)})</span></span>
+                  <span style="color:#8a8a8a; font-size:1.1rem;">→</span>
+                  <span><span style="{pill.format(ink=ink, bg='#fff', fg=ink)}">도착</span>
+                        <b>{pd_['label']}</b> <span style="color:#8a8a8a; font-size:0.8rem;">({_src(pd_)})</span></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             for role, p in places.items():
                 if p.get("warning"):
                     st.warning(f"**{role}**: {p['warning']}")
@@ -548,5 +564,7 @@ with col_result:
             result["orig_point"], result["dest_point"], result["utm_crs"],
             city_threshold=result["city_threshold"],
             visible_routes=visible_routes,
+            orig_label=(result.get("places") or {}).get("출발지", {}).get("label", ""),
+            dest_label=(result.get("places") or {}).get("도착지", {}).get("label", ""),
         )
         st_folium(fmap, width=None, height=600, use_container_width=True)

@@ -344,12 +344,17 @@ with col_result:
         for col, key in zip(metric_cols, ["shortest", "bike", "risk"]):
             s = stats[key]
             with col:
-                st.metric(
+                # 위험도는 "증가/감소" 값이 아니라 경로의 점수라서, 화살표(↑)가 붙으면
+                # "위험도가 올랐다"로 잘못 읽힙니다. 화살표를 끄고 중립색으로 표시합니다.
+                metric_args = (
                     f"{ROUTE_DOTS[key]} {ROUTE_LABELS[key]}",
                     f"약 {s['eta_min']:.0f}분",
                     f"위험도 {s['avg_risk_per_m'] * 100:.0f}점",
-                    delta_color="inverse",
                 )
+                try:
+                    st.metric(*metric_args, delta_color="off", delta_arrow="off")
+                except TypeError:  # delta_arrow를 지원하지 않는 구버전 Streamlit
+                    st.metric(*metric_args, delta_color="off")
                 st.caption(f"{s['length_m']:.0f}m")
 
         # --- 왜 이 경로를 추천했는지 (경로별 구성 비교) ---

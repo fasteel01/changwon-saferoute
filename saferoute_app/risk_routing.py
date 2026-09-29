@@ -429,7 +429,24 @@ def _highway_risk(val) -> float:
 
 
 def _infra_bonus(val) -> float:
-    return INFRA_PROTECTION_MAP.get(_first_if_list(val), DEFAULT_INFRA_PROTECTION)
+    """
+    한 도로명에 여러 유형이 함께 매칭된 경우(예: "자전거보행자겸용도로, 자전거전용도로")
+    문자열 전체로는 매핑에 없어서 보호 없음(0)으로 처리되던 문제가 있어,
+    쉼표로 나눠 각 유형을 인식하도록 고칩니다.
+
+    도로명 단위 매칭이라 그 도로의 어느 구간이 어떤 유형인지는 구분할 수 없으므로,
+    안전 서비스 특성상 보호 수준을 과대평가하지 않도록 "가장 낮은" 보호 수준을 적용합니다.
+    """
+    items = val if isinstance(val, list) else [val]
+    levels = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        for part in item.split(","):
+            part = part.strip()
+            if part in INFRA_PROTECTION_MAP:
+                levels.append(INFRA_PROTECTION_MAP[part])
+    return min(levels) if levels else DEFAULT_INFRA_PROTECTION
 
 
 def compute_risk_scores(G,

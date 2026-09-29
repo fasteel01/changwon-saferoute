@@ -45,14 +45,6 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### (선택) 카카오 장소 검색 설정
-
-등록된 장소(창원시청·창원역 등 30곳) 외의 장소나 도로명 주소를 정확하게 찾으려면 카카오 로컬 API 키가 필요합니다. 키가 없으면 OpenStreetMap 검색으로 동작합니다.
-
-- **Streamlit Cloud**: 앱 → Settings → Secrets에 `KAKAO_REST_API_KEY = "발급받은 REST API 키"` 입력
-- **로컬 실행**: `saferoute_app/.streamlit/secrets.toml` 파일에 같은 내용 작성 (`.gitignore`에 포함되어 GitHub에 올라가지 않음)
-
-`changwon_G_full_with_risk.pkl` 체크포인트 파일이 `app.py`와 같은 디렉토리(`saferoute_app/`)에 있어야 합니다 (창원시 전체 도로망 + 위험도 피처가 미리 계산되어 저장된 파일).
 
 ## 프로젝트 구조
 

@@ -19,7 +19,6 @@ app.py
     그대로 읽기만 하므로 백엔드 로직 변경 없이 app.py 안에서 끝납니다.
 """
 
-import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -105,6 +104,34 @@ st.markdown(
     }}
     .risk-bar-fill {{ height: 100%; background: {RISK_ACCENT}; border-radius: 5px; }}
     .risk-bar-pct {{ font-size: 0.78rem; color: #8a8a8a; width: 36px; text-align: right; flex-shrink: 0; }}
+
+    /* 경로 요약 카드: 휴대폰에서도 세로로 쌓이지 않고 3칸 나란히 */
+    .route-cards {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 4px 0 14px 0; }}
+    .route-card {{ border: 1px solid rgba(128,128,128,0.25); border-top: 4px solid var(--rc); border-radius: 10px;
+                   padding: 8px 10px; min-width: 0; }}
+    .route-card.best {{ box-shadow: 0 0 0 2px var(--rc) inset; }}
+    .route-card .rc-label {{ font-size: 0.78rem; font-weight: 700; color: var(--rc); white-space: nowrap;
+                             overflow: hidden; text-overflow: ellipsis; }}
+    .route-card .rc-time {{ font-size: 1.45rem; font-weight: 800; line-height: 1.2; margin-top: 2px; }}
+    .route-card .rc-meta {{ font-size: 0.78rem; color: #8a8a8a; }}
+    .route-card .rc-risk {{ display: inline-block; margin-top: 4px; font-size: 0.78rem; font-weight: 700;
+                            padding: 1px 8px; border-radius: 999px; background: rgba(128,128,128,0.14); }}
+    .route-card .rc-badge {{ display: inline-block; font-size: 0.68rem; font-weight: 700; color: #fff;
+                             background: var(--rc); border-radius: 4px; padding: 0 5px; margin-left: 4px; }}
+
+    /* 경로 비교표: 지표를 행으로 놓아 휴대폰 폭에서도 가로 스크롤 없이 보이게 */
+    .cmp-table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 6px; }}
+    .cmp-table th, .cmp-table td {{ padding: 6px 6px; border-bottom: 1px solid rgba(128,128,128,0.2); text-align: center; }}
+    .cmp-table th:first-child, .cmp-table td:first-child {{ text-align: left; color: #8a8a8a; font-weight: 500; }}
+    .cmp-table th {{ font-size: 0.78rem; }}
+
+    @media (max-width: 640px) {{
+        h1 {{ font-size: 1.9rem !important; }}
+        .risk-alert-card {{ padding: 16px 14px; }}
+        .risk-score-value {{ font-size: 2.2rem; }}
+        .route-card {{ padding: 7px 7px; }}
+        .route-card .rc-time {{ font-size: 1.2rem; }}
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -319,24 +346,14 @@ with col_input:
     dest_text = place_input("도착지", "창원대학교", "dest")
     run = st.button("경로 비교하기", type="primary", use_container_width=True)
 
-    st.divider()
-    st.caption(
-        "이동거리 우선, 자전거도로 우선, AI 안전경로 3가지 전략으로 "
-        "경로를 계산해서 비교합니다. 위험도는 사고 이력 · 도로 규모 · "
-        "자전거 보호시설 유무를 반영한 값이에요 (0~100점, 낮을수록 안전, "
-        "창원시 전체 도로를 기준으로 계산됩니다). 예상 소요시간은 평균 주행속도 "
-        f"{rr.AVG_BIKE_SPEED_KMH:.0f}km/h 가정 기준 추정치입니다."
-    )
-
-    st.divider()
-    st.markdown("**지도에 표시할 경로**")
-    visible_routes = []
-    for key in ["shortest", "bike", "risk"]:
-        checked = st.checkbox(
-            f"{ROUTE_DOTS[key]} {ROUTE_LABELS[key]}", value=True, key=f"vis_{key}"
+    with st.expander("위험도·소요시간은 어떻게 계산하나요?"):
+        st.caption(
+            "이동거리 우선, 자전거도로 우선, AI 안전경로 3가지 전략으로 "
+            "경로를 계산해서 비교합니다. 위험도는 사고 이력 · 도로 규모 · "
+            "자전거 보호시설 유무를 반영한 값이에요 (0~100점, 낮을수록 안전, "
+            "창원시 전체 도로를 기준으로 계산됩니다). 예상 소요시간은 평균 주행속도 "
+            f"{rr.AVG_BIKE_SPEED_KMH:.0f}km/h 가정 기준 추정치입니다."
         )
-        if checked:
-            visible_routes.append(key)
 
 with col_result:
     if run:
@@ -405,7 +422,7 @@ with col_result:
     result = st.session_state.get("last_result")
 
     if result is None:
-        st.info("왼쪽에서 출발지와 도착지를 입력하고 '경로 비교하기'를 눌러주세요.")
+        st.info("출발지와 도착지를 고르고 '경로 비교하기'를 눌러주세요.")
     else:
         stats = result["stats"]
         G_ssg = result["G_ssg"]
@@ -438,22 +455,48 @@ with col_result:
                 if p.get("warning"):
                     st.warning(f"**{role}**: {p['warning']}")
 
-        metric_cols = st.columns(3)
-        for col, key in zip(metric_cols, ["shortest", "bike", "risk"]):
-            s = stats[key]
-            with col:
-                # 위험도는 "증가/감소" 값이 아니라 경로의 점수라서, 화살표(↑)가 붙으면
-                # "위험도가 올랐다"로 잘못 읽힙니다. 화살표를 끄고 중립색으로 표시합니다.
-                metric_args = (
-                    f"{ROUTE_DOTS[key]} {ROUTE_LABELS[key]}",
-                    f"약 {s['eta_min']:.0f}분",
-                    f"위험도 {s['avg_risk_per_m'] * 100:.0f}점",
-                )
-                try:
-                    st.metric(*metric_args, delta_color="off", delta_arrow="off")
-                except TypeError:  # delta_arrow를 지원하지 않는 구버전 Streamlit
-                    st.metric(*metric_args, delta_color="off")
-                st.caption(f"{s['length_m']:.0f}m")
+        # --- 경로 요약 카드 (휴대폰에서도 3칸 나란히) ---
+        cards = []
+        for key in ["shortest", "bike", "risk"]:
+            s_ = stats[key]
+            color = rr.ROUTE_STYLE[key]["color"]
+            cards.append(
+                f'<div class="route-card{" best" if key == "risk" else ""}" style="--rc:{color};">'
+                f'<div class="rc-label">{ROUTE_LABELS[key]}</div>'
+                f'<div class="rc-time">{s_["eta_min"]:.0f}분</div>'
+                f'<div class="rc-meta">{s_["length_m"] / 1000:.1f}km'
+                + (' · <b style="color:var(--rc);">추천</b>' if key == "risk" else "") + '</div>'
+                f'<div class="rc-risk">위험도 {s_["avg_risk_per_m"] * 100:.0f}점</div>'
+                "</div>"
+            )
+        st.markdown(f'<div class="route-cards">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+        # --- 지도 (휴대폰에서 바로 보이도록 요약 카드 바로 아래에 배치) ---
+        route_keys = ["shortest", "bike", "risk"]
+        try:
+            pill_label = {"shortest": "🔵 최단", "bike": "🟢 자전거도로", "risk": "🔴 AI 안전"}
+            visible_routes = st.pills(
+                "지도에 표시할 경로", route_keys, selection_mode="multi", default=route_keys,
+                format_func=lambda k: pill_label[k], key="vis_routes",
+            ) or []
+        except (AttributeError, TypeError):  # st.pills가 없는 구버전 Streamlit
+            vis_cols = st.columns(3)
+            visible_routes = [
+                k for k, c in zip(route_keys, vis_cols)
+                if c.checkbox(f"{ROUTE_DOTS[k]} {ROUTE_LABELS[k]}", value=True, key=f"vis_{k}")
+            ]
+        fmap = rr.build_comparison_map(
+            result["G_ssg"], result["edges_ssg"], result["routes"], result["stats"],
+            result["orig_point"], result["dest_point"], result["utm_crs"],
+            city_threshold=result["city_threshold"],
+            visible_routes=visible_routes,
+            orig_label=(result.get("places") or {}).get("출발지", {}).get("label", ""),
+            dest_label=(result.get("places") or {}).get("도착지", {}).get("label", ""),
+            show_legend=False,
+        )
+        # 범례는 지도를 가리지 않도록 지도 바로 위에 한 줄로 표시
+        st.markdown(rr.legend_html(visible_routes), unsafe_allow_html=True)
+        st_folium(fmap, width=None, height=480, use_container_width=True, returned_objects=[])
 
         # --- 왜 이 경로를 추천했는지 (경로별 구성 비교) ---
         try:
@@ -465,24 +508,23 @@ with col_result:
                 st.markdown("#### 🤔 왜 이 경로를 추천했나요?")
                 st.write(build_recommendation_explanation(stats, profiles))
 
-                comparison_df = pd.DataFrame(
-                    {
-                        "자전거 인프라 비율": [
-                            f"{profiles[k]['bike_infra_pct']:.0f}%" for k in ["shortest", "bike", "risk"]
-                        ],
-                        "큰 도로 비율": [
-                            f"{profiles[k]['major_road_pct']:.0f}%" for k in ["shortest", "bike", "risk"]
-                        ],
-                        "고위험구간 통과": [
-                            f"{profiles[k]['high_risk_count']}곳" for k in ["shortest", "bike", "risk"]
-                        ],
-                        "평균 위험도": [
-                            f"{stats[k]['avg_risk_per_m'] * 100:.0f}점" for k in ["shortest", "bike", "risk"]
-                        ],
-                    },
-                    index=[f"{ROUTE_DOTS[k]} {ROUTE_LABELS[k]}" for k in ["shortest", "bike", "risk"]],
+                keys = ["shortest", "bike", "risk"]
+                short = {"shortest": "최단거리", "bike": "자전거도로<br>우선", "risk": "AI<br>안전경로"}
+                rows_ = [
+                    ("자전거 인프라", [f"{profiles[k]['bike_infra_pct']:.0f}%" for k in keys]),
+                    ("큰 도로 비율", [f"{profiles[k]['major_road_pct']:.0f}%" for k in keys]),
+                    ("고위험구간 통과", [f"{profiles[k]['high_risk_count']}곳" for k in keys]),
+                    ("평균 위험도", [f"{stats[k]['avg_risk_per_m'] * 100:.0f}점" for k in keys]),
+                ]
+                head = "".join(
+                    f'<th style="color:{rr.ROUTE_STYLE[k]["color"]};">{short[k]}</th>' for k in keys
                 )
-                st.dataframe(comparison_df, use_container_width=True)
+                body = "".join(
+                    "<tr><td>" + name + "</td>" + "".join(f"<td>{v}</td>" for v in vals) + "</tr>"
+                    for name, vals in rows_
+                )
+                st.markdown(f'<table class="cmp-table"><tr><th></th>{head}</tr>{body}</table>',
+                            unsafe_allow_html=True)
                 st.caption(
                     "큰 도로 비율 = 2차로 이상 간선도로(secondary 이상)를 지나는 구간 비율 · "
                     f"고위험구간 = 창원시 전체 도로 중 위험도 상위 {(1 - rr.CITY_RISK_QUANTILE) * 100:.0f}% 이내 구간"
@@ -559,15 +601,4 @@ with col_result:
                         f"위험도 {e['risk_score'] * 100:.0f}점 · {_road_description(e)}"
                     )
 
-        fmap = rr.build_comparison_map(
-            result["G_ssg"], result["edges_ssg"], result["routes"], result["stats"],
-            result["orig_point"], result["dest_point"], result["utm_crs"],
-            city_threshold=result["city_threshold"],
-            visible_routes=visible_routes,
-            orig_label=(result.get("places") or {}).get("출발지", {}).get("label", ""),
-            dest_label=(result.get("places") or {}).get("도착지", {}).get("label", ""),
-            show_legend=False,
-        )
-        # 범례는 지도를 가리지 않도록 지도 바로 위에 한 줄로 표시
-        st.markdown(rr.legend_html(visible_routes), unsafe_allow_html=True)
-        st_folium(fmap, width=None, height=600, use_container_width=True)
+
